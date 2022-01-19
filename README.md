@@ -228,6 +228,7 @@ infra 目录下按实现的类型划分子目录，例如 `mysql`, `redis` 和 `
 > 在这个 example 中我使用了 ants 管理 goroutine 池。这个工具可以全局管理 goroutine 数量，也可以针对某些场景管理特定的 goroutine 数量。
 
 ## 其他规范细节
+* context 实例需要透传，方便级联控制。
 * 编辑器如 GoLand 等配置 `gofmt` 保存时格式化代码。 
 * 错误统一使用 `github.com/pkg/errors` 包装返回，在最初发生错误的地方包装。这个库可以方便地打印出堆栈，对 debug 很有帮助。
 * 待补充
