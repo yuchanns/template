@@ -45,7 +45,7 @@ Go 的一个特色同时也是缺陷：不支持循环引用。
 > 1. 为了高速编译(主要原因)
 > 2. 单向依赖逻辑简洁(大道至简)
 
-所以我们为了避免在应用变得复杂后踩到循环引用的坑，一开始代码结构就要约定好**单边方向**，如上图。
+所以我们为了避免在应用变得复杂后踩到循环引用的坑，一开始代码结构就要约定好**单边方向**，如上图**业务三层模型**。
 
 Server 层也就是 PHP 中 Laravel 的 Controller 层，只负责获取入参、校验和调用 Domain 方法进行数据处理。
 
@@ -120,5 +120,114 @@ func main() {
 │   └── vars.go    # 全局变量注入
 ```
 当你需要寻找 http 请求路由时可以目标明确快速地在 `route.go` 中寻找；需要增加新的容器实例可以直接在 `di.go` 里添加；需要寻找异步事件时也可以在 `event.go`  里按图索骥。
-#### 分层细节
+#### 全局变量
+全局变量在 `startup/vars.go` 中注入，但是声明是在根目录下的 `vars` 文件夹。这是因为全局变量需要被 `starup` 引用，同时又要被业务三层模型引用，会出现 `starup` 和业务三层模型互相引用的情况，于是就需要放在第三方目录即 `vars` 目录下。
+#### 业务模型细节
+业务三层模型统一放置在 `internal` 目录下。`internal` 对于 go 具有特殊意义，放置在这个目录下的代码无法被**跨包调用**，具有隐藏细节的能力。
 
+在 `internal` 中一共分为三个子目录 `server`, `domain` 和 `infra` 分别对应上面提到的业务三层模型的代码位置。
+
+其中请求**入参**和响应**出参**的数据结构应该与 **Server** 一并定义在 `server` 目录中，并只被 `server` 所使用，不透传到其它层。
+
+每个 Server 应该提供一个构造函数，并且该构造函数将在启动时被 `startup` 用于注册路由或事件。
+
+Server 的每个方法，统一返回 `(interface{}, error)` 这两个类型：前者返回最终处理后的数据，后者返回错误。
+```go
+func (g *GreeterSrv) SayHello(ctx *gin.Context) (interface{}, error) {
+	req := RequestHello{}
+	if err := ctx.ShouldBindQuery(&req); err != nil {
+		return nil, err
+	}
+	gm, err := g.dom.SayHello(ctx, req.ID)
+	if err != nil {
+		return nil, err
+	}
+	resp := &ResponseHello{}
+	err = utils.Convert(gm, &resp)
+	return resp, err
+}
+```
+显然这样的返回不符合 gin 路由的注册要求，但符合编写直觉，遇到错误直接返回错误即可。
+
+我们在工具目录 `utils` 中封装了一个构建符合 gin 路由注册要求的函数，同时节省了对 http 进行正确和错误响应的重复代码：
+```go
+func BuildGinHandler(fn func(ctx *gin.Context) (interface{}, error)) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		data, err := fn(ctx)
+		if err != nil {
+			ctx.JSON(http.StatusOK, gin.H{
+				"msg":  err.Error(),
+				"code": 500,
+				"data": nil,
+			})
+			return
+		}
+		ctx.JSON(http.StatusOK, gin.H{
+			"msg":  "success",
+			"code": 0,
+			"data": data,
+		})
+	}
+}
+```
+在注册路由时只需用该函数对 Server 的方法做一层包装即可 `engine.GET("/greet", utils.BuildGinHandler(srv.SayHello))` 。
+
+> 为什么返回这两个类型？
+>
+> 曾经试过把 Server 的方法写成实现了 `gin.HandlerFunc` 的函数类型，直接注册到 gin 的路由里。这样当然没有什么问题，但是每个方法都需要写大量的响应代码，或正确或错误，浪费时间和空间：
+> 
+> ```go
+> func (g *GreeterSrv) SayHello(ctx *gin.Context) {
+>     // ...
+>     result, err := g.dom.DoSometh()
+>     if err != nil {
+>         ctx.JSON(http.StatusOK, gin.H{"msg": err.Error()})
+>         return
+>     }
+>     ctx.JSON(http.StatusOK, gin.H{"data": result})
+>     return
+> }
+> 
+> ```
+> 
+> 重复使用 ctx.JSON ，还需要换行 return 。
+> 
+> 当然也可以封装类似 JSONSuccess(ctx context.Context, data interface{}) 的方法，但依然需要多写一行 return 甚至可能因为遗忘导致代码继续执行下去。
+
+domain 目录下按不同的业务划分各自的子目录，一般在这些子目录下至少包含 `domain.go` 和 `repo.go` 两个文件，用于存放业务逻辑和数据交互接口定义。
+
+infra 目录下按实现的类型划分子目录，例如 `mysql`, `redis` 和 `client` 。
+
+其中 `mysql` 下还有一个 `models` 子目录，保存着适用特定 ORM 要求的数据结构也就是 **DO**，只被 `mysql` 层所使用，不透传到其他层。
+
+从 Server 层到 Domain 层 到 Infra 层，数据的传输通过定义在 Domain 层的 **DTO** 来实现：
+* Server 层负责将 **Request** 转化成 **DTO** 以及将 **DTO** 转化成 **Response** 。
+* Infra 层负责 **Model** 和 **DTO** 之间的转换。
+
+这里要注意在 Domain 层既不引用 **Request** 也不引用 **Model** ，就不会发生循环引用。
+
+#### 工具包
+我们还有一个 `utils` 目录，用于存放常用工具。事实上这些常用工具应该被封装成一个第三方库，然后每个项目都引用这个库，而不是在每个项目下重复写一遍 `utils` ，这里仅仅是出于演示需要才这么做。
+
+常用工具包括但不限于：
+* 数据结构转换工具(通常使用 json 实现)
+* 安全 goroutine 构建工具( panic 日志记录，控制并发数量等)
+* 依赖注入工具
+* 一些中间件
+#### 异步任务
+我们的 Server 分为两种，一种是 http Server 另一种是 event Server ，它们分别通过 `startup/route.go` 和 `startup/event.go` 进行注册。
+
+虽然官方说使用 goroutine 异常简单只需要原地 `go` 一个就可以，但如果你真的这么做，将会导致 goroutine 在代码中到处都是，混乱不堪。你甚至无法快速判断一个 http 请求里是不是会包含其他 goroutine ，想要限流时也会变得很麻烦。
+> 比如实际开发中遇到的某个场景，用户通过触发一个路由去异步刷新日志。刷新日志之前还需要请求另一个服务获取日志的一些标识信息。刷新日志是一个持续3分钟的行为。
+>
+> 原本这整个逻辑被简单粗暴地用一个 `go` 处理了，结果该路由被高频调用，导致提供日志标识信息的服务被冲垮。
+>
+> 当时我们的应急处理方案是对 goroutine 进行限量，但是刷新日志需要持续三分钟，这样就会导致三分钟里只有少数用户可以看到日志的刷新，所以变得很棘手。后来我暂时通过细化 goroutine 的粒度去解决限流问题，这是题外话。
+
+所以当我们需要执行异步任务时，最好在同步请求中将异步任务通过 `channel` 或者外部队列投递，然后在统一的事件入口注册这些异步任务。便于管理(比如限流)和查找。
+> 在这个 example 中我使用了 ants 管理 goroutine 池。这个工具可以全局管理 goroutine 数量，也可以针对某些场景管理特定的 goroutine 数量。
+
+## 其他规范细节
+* 编辑器如 GoLand 等配置 `gofmt` 保存时格式化代码。 
+* 错误统一使用 `github.com/pkg/errors` 包装返回，在最初发生错误的地方包装。这个库可以方便地打印出堆栈，对 debug 很有帮助。
+* 待补充
