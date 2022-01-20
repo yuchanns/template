@@ -50,7 +50,7 @@ Go 的一个特色同时也是缺陷：不支持循环引用。
 Server 层也就是 PHP 中 Laravel 的 Controller 层，只负责获取入参、校验和调用 Domain 方法进行数据处理。
 
 Domain 层用于编写具体而复杂的业务逻辑。
-> 有的团队会把 Domain 细分成 Service 和 Domain 或者 App 和 Service 或者三者皆有。实际开发过程中发觉这样太过复杂，不需要分那么多层，所以一般取一个 Domain 层就足矣。
+> 有的团队会把 Domain 细分成 Service 和 Domain 或者 App 和 Service 或者三者皆有。实际开发过程中发觉这样太过复杂，不需要分那么多层，所以一般取一个 Domain 层就足矣。当然，根据喜好和理解通用性叫 Service 也没什么问题。
 
 同时可以注意到 Domain 还包含了一些以 Repo 为名字后缀的接口，这是用来定义数据交互的接口，对业务逻辑屏蔽了具体的细节和差异。 Domain 业务逻辑通过调用这些接口来与实际的数据库、缓存或者远程调用进行交互。
 > 使用接口编程的好处之一是和具体实现解绑。
@@ -70,8 +70,11 @@ Infra 层是基础设施层，真正进行数据交互操作的地方，实现�
 > 1. 数据结构转换，入参 request 数据结构转换成 domain 层的 DTO(Data Transfer Object) 、DTO 转换成具体数据库的 DO(Data Object)。
 > 2. Channel 通道，在 Domain 层投递数据，在 Server 层取数据。
 > 3. 数据库实例，在 Server 层创建，在 Infra 层使用。
+> 4. Domain 业务间存在相互引用的业务和代码复用关系。
 > 
-> 这种时候建议把代码写在不属于任何一层的**第三方目录**，例如根目录的 common 、utils 等目录下。这样任一层都可以调用而不会出现循环引用编译失败。
+> 这种时候建议：
+> 1. 把代码写在不属于任何一层的**第三方目录**，例如根目录的 common 、utils 等目录下。这样任一层都可以调用而不会出现循环引用编译失败。
+> 2. 由上一层调用传递所需数据，如 Server 层调用第一个 Domain 将结果传递给第二个 Domain （如果前期评估业务中存在大量这种关系，可以在 Server 和 Domain 间增加一层 Service 层，避免 Server 层复杂化）。
 
 ### 目录划分与代码细节
 #### 程序入口
@@ -172,6 +175,10 @@ func BuildGinHandler(fn func(ctx *gin.Context) (interface{}, error)) gin.Handler
 ```
 在注册路由时只需用该函数对 Server 的方法做一层包装即可 `engine.GET("/greet", utils.BuildGinHandler(srv.SayHello))` 。
 
+> 需要自定义 HTTP 响应码？
+>
+> 将返回值改成三个，并对包装函数做相应修改即可。
+>
 > 为什么返回这两个类型？
 >
 > 曾经试过把 Server 的方法写成实现了 `gin.HandlerFunc` 的函数类型，直接注册到 gin 的路由里。这样当然没有什么问题，但是每个方法都需要写大量的响应代码，或正确或错误，浪费时间和空间：
