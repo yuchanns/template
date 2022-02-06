@@ -1,7 +1,0 @@
-theme: jekyll-theme-architect
-readme_index:
-  enabled: true
-  remove_originals: false
-  with_frontmatter: false
-plugins:
-- jekyll-readme-index
